@@ -1,6 +1,8 @@
 import Equipments from "../models/Equipments.js";
 import Reservation from "../models/Reservation.js";
+import User from "../models/User.js";
 import logger from "../config/logger.js";
+import mongoose from "mongoose";
 import { checkAndProcessExpiredReservations } from "../services/autoReturnService.js";
 
 export const createEquipment = async (req, res) => {
@@ -280,6 +282,8 @@ export const getAllReservations = async (req, res) => {
     await checkAndProcessExpiredReservations();
     
     const { search, category, status, page = 1, limit = 10 } = req.query;
+    const userRole = req.user?.role;
+    const userId = req.user?.id;
     
     // Parse page and limit as integers
     const pageNum = parseInt(page, 10);
@@ -289,10 +293,58 @@ export const getAllReservations = async (req, res) => {
     const validPage = pageNum > 0 ? pageNum : 1;
     const validLimit = limitNum > 0 && limitNum <= 100 ? limitNum : 10;
     
-    logger.info(`Fetching all reservations with search: ${search}, category: ${category}, status: ${status}, page: ${validPage}, limit: ${validLimit}`);
+    logger.info(`Fetching all reservations with search: ${search}, category: ${category}, status: ${status}, page: ${validPage}, limit: ${validLimit}, role: ${userRole}`);
 
     // Build base query
     let query = {};
+
+    // If user is STAFF, filter reservations to only show those from students in their class
+    if (userRole === 'STAFF') {
+      // Get the staff user's class
+      let staffUserId = userId;
+      if (typeof userId === 'string' && mongoose.Types.ObjectId.isValid(userId)) {
+        staffUserId = new mongoose.Types.ObjectId(userId);
+      }
+      
+      const staffUser = await User.findById(staffUserId);
+      
+      if (!staffUser || !staffUser.sclass) {
+        return res.status(400).json({
+          status: "error",
+          message: "Staff member must be assigned to a class",
+          data: null,
+        });
+      }
+
+      // Get all students in the staff's class
+      const studentsInClass = await User.find({ 
+        role: 'STUDENT', 
+        sclass: staffUser.sclass 
+      }).select('_id');
+
+      // If no students in class, return empty result
+      if (studentsInClass.length === 0) {
+        return res.status(200).json({
+          status: "success",
+          message: "No students found in your class",
+          data: [],
+          pagination: {
+            currentPage: validPage,
+            totalPages: 0,
+            totalCount: 0,
+            limit: validLimit,
+            hasNextPage: false,
+            hasPrevPage: false
+          }
+        });
+      }
+
+      const studentIds = studentsInClass.map(student => student._id);
+      
+      // Filter reservations to only include those from students in this class
+      query.user = { $in: studentIds };
+      logger.info(`Staff filtering: Showing reservations from ${studentIds.length} students in class ${staffUser.sclass}`);
+    }
 
     // Filter by status
     if (status) {
